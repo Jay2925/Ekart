@@ -1,11 +1,14 @@
-pipeline { 
-    agent { label ' jenkins_slave' }
+pipeline {   
+    agent { label 'Slave1' }
 
-    environment {
+    tools { 
+        maven 'maven3'
+    }
+
+    environment {   
         ECR_REPO = '866934333672.dkr.ecr.us-east-1.amazonaws.com/jay-repo'
         IMAGE_NAME = 'app-image'
         TAG = "${env.BRANCH_NAME}-${env.BUILD_ID}"
-        SSH_KEY = credentials('ec2-ssh-key')
     }
 
     stages {
@@ -14,11 +17,18 @@ pipeline {
                 git branch: "${env.BRANCH_NAME}", url: 'https://github.com/your-org/your-repo.git'
             }
         }
+        
+        stage('Build Application') {
+            steps {
+                sh 'mvn clean package -Dmaven.test.skip=true'
+            }
+        }
 
         stage('Build Docker Image') {
             steps {
                 script {
-                    docker.build("${env.ECR_REPO}:${env.TAG}")
+                    // Specify the Dockerfile location using the -f option
+                    docker.build("${env.ECR_REPO}:${env.TAG}", "-f docker/Dockerfile .")
                 }
             }
         }
@@ -37,8 +47,18 @@ pipeline {
                         subject: "Jenkins Job - Docker Image Pushed to ECR Successfully",
                         body: "Hello,\n\nThe Docker image '${env.IMAGE_NAME}:${env.TAG}' has been successfully pushed to ECR.\n\nBest regards,\nJenkins",
                         recipientProviders: [[$class: 'DevelopersRecipientProvider']],
-                        to: "m.ehtasham.azhar@gmail.com"
+                        to: "jap4810@gmail.com"
                     )
+                }
+            }
+        }
+
+        stage('Container Security Scan - Trivy') {
+            steps {
+                script {
+                    sh 'aws ecr get-login-password --region us-east-1 | sudo docker login --username AWS --password-stdin 866934333672.dkr.ecr.us-east-1.amazonaws.com'
+                    sh 'sudo usermod -aG docker root'
+                    sh "trivy image 866934333672.dkr.ecr.us-east-1.amazonaws.com/jay-repo:main-9"
                 }
             }
         }
@@ -53,33 +73,30 @@ pipeline {
             }
         }
 
-        stage('Container Security Scan - Trivy') {
-            steps {
-                script {
-                    sh "trivy image ${ECR_REPO}:${TAG}"
-                }
-            }
-        }
-
         stage('Deploy to Environment') {
             steps {
                 script {
+                    // Check the branch name and set the appropriate target
                     def targetHost = ''
                     if (env.BRANCH_NAME == 'dev') {
-                        targetHost = '<DEV-EC2-IP>'
+                        targetHost = 'dev-server'  // Define the name or address for the dev server if needed
                     } else if (env.BRANCH_NAME == 'staging') {
-                        targetHost = '<STAGING-EC2-IP>'
+                        targetHost = 'staging-server'  // Define the name or address for staging
                     } else if (env.BRANCH_NAME == 'main') {
-                        targetHost = '<PROD-EC2-IP>'
+                        targetHost = 'production-server'  // Define the production server address
                     }
-
+                    
+                    // Run deployment commands directly on the same agent (slave) server
+                    echo "Deploying to $targetHost"
                     sh """
-                    ssh -i ${SSH_KEY} ec2-user@${targetHost} << EOF
-                    docker pull ${ECR_REPO}:${TAG}
-                    docker stop ${IMAGE_NAME} || true
-                    docker rm ${IMAGE_NAME} || true
-                    docker run -d --name ${IMAGE_NAME} -p 80:80 ${ECR_REPO}:${TAG}
-                    EOF
+                        echo "Pulling Docker image..."
+                        docker pull ${ECR_REPO}:${TAG}
+                        echo "Stopping existing container..."
+                        docker stop ${IMAGE_NAME} || true
+                        docker rm ${IMAGE_NAME} || true
+                        echo "Running new container..."
+                        docker run -d --name ${IMAGE_NAME} -p 80:80 ${ECR_REPO}:${TAG}
+                        echo "Deployment completed"
                     """
                 }
             }
